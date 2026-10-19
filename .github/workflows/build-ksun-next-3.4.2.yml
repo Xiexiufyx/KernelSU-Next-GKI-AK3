@@ -1,0 +1,395 @@
+name: KernelSU Next v3.4.2 GKI AnyKernel3
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Build one smoke target or all 211 Normal GKI targets
+        type: choice
+        options: [smoke, full]
+        default: smoke
+        required: true
+      family:
+        description: Family for the smoke build (ignored for full)
+        type: choice
+        options:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+          - android17-6.18
+        default: android16-6.12
+        required: true
+      patch_level:
+        description: Exact YYYY-MM or lts entry for smoke (ignored for full)
+        type: string
+        default: '2026-09'
+        required: true
+      smoke_run_id:
+        description: Full builds require the successful, published smoke run ID from this exact commit
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: ksun-next-v3.4.2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      expected_count: ${{ steps.validate.outputs.expected_count }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate scope, target, and prior smoke release
+        id: validate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCOPE: ${{ inputs.scope }}
+          FAMILY: ${{ inputs.family }}
+          PATCH_LEVEL: ${{ inputs.patch_level }}
+          SMOKE_RUN_ID: ${{ inputs.smoke_run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE" = smoke ]; then
+            config=".github/config/${FAMILY}.json"
+            test -f "$config"
+            count="$(jq --arg date "$PATCH_LEVEL" '[.include[] | select(.date == $date)] | length' "$config")"
+            if [ "$count" -ne 1 ]; then
+              echo "Smoke requires exactly one configured Normal target: ${FAMILY} ${PATCH_LEVEL} (found ${count})." >&2
+              exit 1
+            fi
+          elif [ "$SCOPE" = full ]; then
+            if ! [[ "$SMOKE_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo 'Full builds require a successful smoke_run_id.' >&2
+              exit 1
+            fi
+            smoke="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SMOKE_RUN_ID}")"
+            jq -e --arg sha "$GITHUB_SHA" \
+              '.conclusion == "success" and .event == "workflow_dispatch" and
+               .path == ".github/workflows/build-ksun-next-3.4.2.yml" and .head_sha == $sha' \
+              <<< "$smoke" >/dev/null
+            gh release view "ksun-next-v3.4.2-smoke-${SMOKE_RUN_ID}" --json isDraft,assets |
+              jq -e '.isDraft == false and
+                ([.assets[] | select(.name | endswith("-KSUN-v3.4.2.zip"))] | length == 1)' >/dev/null
+            count="$(jq -s '[.[] | .include | length] | add' .github/config/android*.json)"
+            if [ "$count" -ne 211 ]; then
+              echo "Expected 211 Normal configuration rows, found ${count}; review matrix before building." >&2
+              exit 1
+            fi
+          else
+            echo "Unsupported scope: $SCOPE" >&2
+            exit 1
+          fi
+          echo "expected_count=$count" >> "$GITHUB_OUTPUT"
+          echo "Selected ${count} Normal target(s); KernelSU Next v3.4.2 at 4c706b5938665866ebe16944a481a7b91e3396af."
+
+  build-android12-5-10:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android12-5.10'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android12-5.10.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  build-android13-5-10:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android13-5.10'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android13-5.10.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  build-android13-5-15:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android13-5.15'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android13-5.15.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  build-android14-5-15:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android14-5.15'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android14-5.15.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  build-android14-6-1:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android14-6.1'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android14-6.1.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  build-android15-6-6:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android15-6.6'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android15-6.6.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  build-android16-6-12:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android16-6.12'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android16-6.12.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  build-android17-6-18:
+    needs: preflight
+    if: inputs.scope == 'full' || inputs.family == 'android17-6.18'
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android17-6.18.json
+      os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
+      root_flavor: next
+      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      feature_set: None
+      variant: Normal
+      brand_name: KernelSU-Next
+      use_cache: false
+
+  release:
+    needs:
+      - preflight
+      - build-android12-5-10
+      - build-android13-5-10
+      - build-android13-5-15
+      - build-android14-5-15
+      - build-android14-6-1
+      - build-android15-6-6
+      - build-android16-6-12
+      - build-android17-6-18
+    if: >-
+      always() && !cancelled() && needs.preflight.result == 'success' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SCOPE: ${{ inputs.scope }}
+      FAMILY: ${{ inputs.family }}
+      PATCH_LEVEL: ${{ inputs.patch_level }}
+      EXPECTED_COUNT: ${{ needs.preflight.outputs.expected_count }}
+      ROOT_SHA: 4c706b5938665866ebe16944a481a7b91e3396af
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download, validate, and package every expected GKI artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/ksun-v3.4.2"
+          mkdir -p "$work/assets" "$work/stage"
+          targets="$work/targets.jsonl"
+          : > "$targets"
+          for config in .github/config/android*.json; do
+            jq -c --arg scope "$SCOPE" --arg family "$FAMILY" --arg date "$PATCH_LEVEL" '
+              .version as $version | .include[] |
+              select($scope == "full" or ($version == $family and .date == $date)) |
+              {family: $version, sublevel: .sublevel, date: .date}
+            ' "$config" >> "$targets"
+          done
+          test "$(wc -l < "$targets")" -eq "$EXPECTED_COUNT"
+
+          inventory_lines="$work/inventory.jsonl"
+          : > "$inventory_lines"
+          for page in $(seq 1 20); do
+            batch="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100&page=${page}")"
+            jq -c '.artifacts[] | {id, name, expired}' <<< "$batch" >> "$inventory_lines"
+            if [ "$(jq '.artifacts | length' <<< "$batch")" -lt 100 ]; then break; fi
+            if [ "$page" -eq 20 ]; then echo 'Artifact inventory exceeded 2000; refusing partial release.' >&2; exit 1; fi
+          done
+          jq -s . "$inventory_lines" > "$work/inventory.json"
+          matched="$work/matched-artifacts.txt"
+          : > "$matched"
+
+          while IFS= read -r target; do
+            family="$(jq -r .family <<< "$target")"
+            sublevel="$(jq -r .sublevel <<< "$target")"
+            date="$(jq -r .date <<< "$target")"
+            android="${family%%-*}"
+            kver="${family#*-}"
+            if [ "$sublevel" = X ]; then
+              # LTS sublevel comes from the checked-out kernel Makefile at build time.
+              mapfile -t matches < <(jq -r --arg prefix "${kver}." --arg suffix "-${android}-lts-AnyKernel3" \
+                '.[] | select(.expired == false and (.name | startswith($prefix) and endswith($suffix))) | [.id, .name] | @tsv' "$work/inventory.json")
+            else
+              wanted="${kver}.${sublevel}-${android}-${date}-AnyKernel3"
+              mapfile -t matches < <(jq -r --arg wanted "$wanted" \
+                '.[] | select(.expired == false and .name == $wanted) | [.id, .name] | @tsv' "$work/inventory.json")
+            fi
+            if [ "${#matches[@]}" -ne 1 ]; then
+              echo "Expected one AK3 artifact for ${family} ${date} (sublevel ${sublevel}), got ${#matches[@]}." >&2
+              exit 1
+            fi
+            IFS=$'\t' read -r artifact_id artifact_name <<< "${matches[0]}"
+            info_name="${artifact_name%-AnyKernel3}-BuildInfo"
+            mapfile -t info < <(jq -r --arg wanted "$info_name" \
+              '.[] | select(.expired == false and .name == $wanted) | [.id, .name] | @tsv' "$work/inventory.json")
+            if [ "${#info[@]}" -ne 1 ]; then
+              echo "Missing exactly one BuildInfo for ${artifact_name}." >&2
+              exit 1
+            fi
+            IFS=$'\t' read -r info_id _ <<< "${info[0]}"
+            printf '%s\n' "$artifact_name" >> "$matched"
+
+            curl -fLsS --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" -o "$work/artifact.zip"
+            curl -fLsS --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${info_id}/zip" -o "$work/info.zip"
+            unzip -tqq "$work/artifact.zip" >/dev/null
+            unzip -tqq "$work/info.zip" >/dev/null
+            unzip -q "$work/artifact.zip" -d "$work/stage"
+            unzip -q "$work/info.zip" -d "$work/stage-info"
+            image="$work/stage/Image"
+            script="$work/stage/anykernel.sh"
+            if [ ! -s "$image" ] || [ ! -s "$script" ]; then
+              echo "AK3 requires nonempty root-level Image and anykernel.sh: ${artifact_name}" >&2
+              exit 1
+            fi
+            if [ "$(od -An -tx1 -j56 -N4 "$image" | tr -d ' \n')" != 41524d64 ]; then
+              echo "Image lacks ARM64 Linux Image magic: ${artifact_name}" >&2
+              exit 1
+            fi
+            mapfile -t summaries < <(find "$work/stage-info" -maxdepth 1 -name 'build-summary-*.md' -type f)
+            if [ "${#summaries[@]}" -ne 1 ]; then echo "Invalid BuildInfo for ${artifact_name}" >&2; exit 1; fi
+            awk '/^```json$/{inside=1;next} inside && /^```$/{exit} inside{print}' "${summaries[0]}" > "$work/metadata.json"
+            jq -e --arg sha "$ROOT_SHA" --arg family "$family" --arg branch "${family}-${date}" '
+              .status == "Build-verified only" and
+              .root.implementation == "next" and .root.commit == $sha and
+              .kmi == $family and .android_branch == $branch and
+              .susfs_revision == "N/A" and .nomount_commit == "N/A" and
+              (.kernel_source_commit | test("^[0-9a-f]{40}$"))
+            ' "$work/metadata.json" >/dev/null
+            jq -n --slurpfile meta "$work/metadata.json" \
+              --arg root "$ROOT_SHA" --arg repo "$GITHUB_REPOSITORY" \
+              --arg workflow_sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+              --arg image_sha "$(sha256sum "$image" | cut -d' ' -f1)" \
+              --arg anykernel_sha "$(sha256sum "$script" | cut -d' ' -f1)" \
+              '{kernel_su_next: {version: "v3.4.2", commit: $root},
+                kernel: {kmi: $meta[0].kmi, android_branch: $meta[0].android_branch,
+                         source_commit: $meta[0].kernel_source_commit, image_sha256: $image_sha},
+                anykernel_sh_sha256: $anykernel_sha, susfs: false,
+                workflow: {repository: $repo, commit: $workflow_sha, run_id: $run},
+                build_info: $meta[0]}' > "$work/stage/SOURCE.json"
+            asset_name="${artifact_name%-AnyKernel3}-KSUN-v3.4.2.zip"
+            (cd "$work/stage" && zip -q -r -9 "$work/assets/$asset_name" .)
+            unzip -tqq "$work/assets/$asset_name" >/dev/null
+            (cd "$work/assets" && sha256sum "$asset_name" >> SHA256SUMS.txt)
+            rm -rf "$work/stage" "$work/stage-info" "$work/artifact.zip" "$work/info.zip" "$work/metadata.json"
+            mkdir -p "$work/stage"
+          done < "$targets"
+          if [ "$(sort -u "$matched" | wc -l)" -ne "$EXPECTED_COUNT" ] ||
+             [ "$(find "$work/assets" -maxdepth 1 -name '*-KSUN-v3.4.2.zip' -type f | wc -l)" -ne "$EXPECTED_COUNT" ]; then
+            echo 'Artifact count or uniqueness mismatch; refusing release.' >&2
+            exit 1
+          fi
+          printf 'KernelSU Next v3.4.2 (%s, %s Normal GKI targets)\n\nRoot source: %s\nGitHub Actions run: %s/%s/actions/runs/%s\n\nSUSFS: disabled. NoMount: disabled. Each ZIP contains its own SOURCE.json with kernel commit and Image checksum. See SHA256SUMS.txt for ZIP checksums. GKI compatibility is not a guarantee of device bootability.\n' \
+            "$SCOPE" "$EXPECTED_COUNT" "$ROOT_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$work/release-notes.md"
+          echo "Validated ${EXPECTED_COUNT} ARM64 Images, AK3 scripts, matching build metadata, and SHA manifests."
+
+      - name: Publish release only after complete verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/ksun-v3.4.2"
+          tag="ksun-next-v3.4.2-${SCOPE}-${GITHUB_RUN_ID}"
+          if gh release view "$tag" --json isDraft -q '.isDraft' >/dev/null 2>&1; then
+            if [ "$(gh release view "$tag" --json isDraft -q '.isDraft')" != true ]; then
+              echo "Refusing to modify already published release ${tag}." >&2
+              exit 1
+            fi
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --draft \
+              --title "KernelSU Next v3.4.2 GKI AK3 (${SCOPE})" --notes-file "$work/release-notes.md"
+          fi
+          shopt -s nullglob
+          assets=("$work"/assets/*-KSUN-v3.4.2.zip "$work"/assets/SHA256SUMS.txt)
+          if [ "${#assets[@]}" -ne "$((EXPECTED_COUNT + 1))" ]; then
+            echo 'Release asset count changed after verification.' >&2
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            uploaded=false
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$asset" --clobber; then uploaded=true; break; fi
+              sleep 10
+            done
+            if [ "$uploaded" != true ]; then
+              echo "Release upload failed: $asset. Draft kept unpublished." >&2
+              exit 1
+            fi
+          done
+          for attempt in $(seq 1 10); do
+            if gh release view "$tag" --json assets |
+              jq -e --argjson want "$((EXPECTED_COUNT + 1))" \
+                '.assets | length == $want and all(.[]; .size > 0)' >/dev/null; then break; fi
+            if [ "$attempt" -eq 10 ]; then echo 'Incomplete draft release assets.' >&2; exit 1; fi
+            sleep 5
+          done
+          gh release edit "$tag" --draft=false
+          gh release view "$tag" --json url,isDraft,assets |
+            jq -e --argjson want "$((EXPECTED_COUNT + 1))" \
+              'select(.isDraft == false and (.assets | length == $want)) | .url'
