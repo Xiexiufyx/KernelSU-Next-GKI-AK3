@@ -81,11 +81,15 @@ runs:
           if [ "$PAGE_SIZE" = "16k" ]; then
             PAGE_SIZE_FLAGS+=(--page_size=16k)
           fi
+          BUILD_TARGET="//common:kernel_aarch64/Image"
+          if [ "${{ inputs.version }}" = "android17-6.18" ]; then
+            BUILD_TARGET="//common:kernel_aarch64"
+          fi
           tools/bazel build \
             --config=fast \
             "${PAGE_SIZE_FLAGS[@]}" \
             --disk_cache=/home/runner/.cache/bazel \
-            //common:kernel_aarch64/Image
+            "$BUILD_TARGET"
         fi
 
     - name: 'Verify Page Size in Generated .config'
