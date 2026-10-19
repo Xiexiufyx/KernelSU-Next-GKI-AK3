@@ -270,9 +270,15 @@ jobs:
           tag="ksun-next-v3.4.2-${SCOPE}-${GITHUB_RUN_ID}"
           printf 'KernelSU Next v3.4.2 (%s, %s Normal GKI targets)\n\nRoot source: %s\nGitHub Actions run: %s/%s/actions/runs/%s\n\nSUSFS: disabled. NoMount: disabled. Each ZIP contains its own SOURCE.json with kernel commit and Image checksum. See SHA256SUMS.txt for ZIP checksums. GKI compatibility is not a guarantee of device bootability.\n' \
             "$SCOPE" "$EXPECTED_COUNT" "$ROOT_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$work/release-notes.md"
-          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" > "$work/existing-release.json" 2>/dev/null; then
-            jq -e --arg sha "$GITHUB_SHA" '.draft == true and .target_commitish == $sha' \
-              "$work/existing-release.json" >/dev/null || {
+          release_matches="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -cs --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]')"
+          if [ "$(jq 'length' <<< "$release_matches")" -gt 1 ]; then
+            echo "Multiple releases match ${tag}; refusing to upload." >&2
+            exit 1
+          fi
+          if [ "$(jq 'length' <<< "$release_matches")" -eq 1 ]; then
+            jq -e --arg sha "$GITHUB_SHA" '.[0] | .draft == true and .target_commitish == $sha' \
+              <<< "$release_matches" >/dev/null || {
                 echo "Refusing to modify a published or mismatched release: ${tag}." >&2
                 exit 1
               }
@@ -403,7 +409,11 @@ jobs:
           fi
           printf '%s\n' SHA256SUMS.txt >> "$work/expected-names.txt"
           sort "$work/expected-names.txt" > "$work/expected-sorted.txt"
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.id')"
+          release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -ers --arg tag "$tag" --arg sha "$GITHUB_SHA" '
+              [.[][] | select(.tag_name == $tag)] |
+              if length == 1 and .[0].draft == true and .[0].target_commitish == $sha
+              then .[0].id else error("Missing or mismatched draft release") end')"
           for attempt in $(seq 1 10); do
             : > "$work/remote-assets.jsonl"
             rm -f "$work/remote-sorted.txt"
