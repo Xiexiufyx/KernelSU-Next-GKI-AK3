@@ -264,6 +264,22 @@ jobs:
           jq -s . "$inventory_lines" > "$work/inventory.json"
           matched="$work/matched-artifacts.txt"
           : > "$matched"
+          expected_names="$work/expected-names.txt"
+          : > "$expected_names"
+          : > "$work/SHA256SUMS.txt"
+          tag="ksun-next-v3.4.2-${SCOPE}-${GITHUB_RUN_ID}"
+          printf 'KernelSU Next v3.4.2 (%s, %s Normal GKI targets)\n\nRoot source: %s\nGitHub Actions run: %s/%s/actions/runs/%s\n\nSUSFS: disabled. NoMount: disabled. Each ZIP contains its own SOURCE.json with kernel commit and Image checksum. See SHA256SUMS.txt for ZIP checksums. GKI compatibility is not a guarantee of device bootability.\n' \
+            "$SCOPE" "$EXPECTED_COUNT" "$ROOT_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$work/release-notes.md"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" > "$work/existing-release.json" 2>/dev/null; then
+            jq -e --arg sha "$GITHUB_SHA" '.draft == true and .target_commitish == $sha' \
+              "$work/existing-release.json" >/dev/null || {
+                echo "Refusing to modify a published or mismatched release: ${tag}." >&2
+                exit 1
+              }
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --draft \
+              --title "KernelSU Next v3.4.2 GKI AK3 (${SCOPE})" --notes-file "$work/release-notes.md"
+          fi
 
           while IFS= read -r target; do
             family="$(jq -r .family <<< "$target")"
@@ -337,18 +353,34 @@ jobs:
             asset_name="${artifact_name%-AnyKernel3}-KSUN-v3.4.2.zip"
             (cd "$work/stage" && zip -q -r -9 "$work/assets/$asset_name" .)
             unzip -tqq "$work/assets/$asset_name" >/dev/null
-            (cd "$work/assets" && sha256sum "$asset_name" >> SHA256SUMS.txt)
+            (cd "$work/assets" && sha256sum "$asset_name" >> "$work/SHA256SUMS.txt")
+            printf '%s\n' "$asset_name" >> "$expected_names"
+            uploaded=false
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$work/assets/$asset_name" --clobber; then
+                uploaded=true
+                break
+              fi
+              sleep 10
+            done
+            if [ "$uploaded" != true ]; then
+              echo "Release upload failed: $asset_name. Draft kept unpublished." >&2
+              exit 1
+            fi
+            rm -f "$work/assets/$asset_name"
             rm -rf "$work/stage" "$work/stage-info" "$work/artifact.zip" "$work/info.zip" "$work/metadata.json"
             mkdir -p "$work/stage"
           done < "$targets"
           if [ "$(sort -u "$matched" | wc -l)" -ne "$EXPECTED_COUNT" ] ||
-             [ "$(find "$work/assets" -maxdepth 1 -name '*-KSUN-v3.4.2.zip' -type f | wc -l)" -ne "$EXPECTED_COUNT" ]; then
+             [ "$(sort -u "$expected_names" | wc -l)" -ne "$EXPECTED_COUNT" ] ||
+             [ "$(wc -l < "$work/SHA256SUMS.txt")" -ne "$EXPECTED_COUNT" ]; then
             echo 'Artifact count or uniqueness mismatch; refusing release.' >&2
             exit 1
           fi
-          printf 'KernelSU Next v3.4.2 (%s, %s Normal GKI targets)\n\nRoot source: %s\nGitHub Actions run: %s/%s/actions/runs/%s\n\nSUSFS: disabled. NoMount: disabled. Each ZIP contains its own SOURCE.json with kernel commit and Image checksum. See SHA256SUMS.txt for ZIP checksums. GKI compatibility is not a guarantee of device bootability.\n' \
-            "$SCOPE" "$EXPECTED_COUNT" "$ROOT_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$work/release-notes.md"
-          echo "Validated ${EXPECTED_COUNT} ARM64 Images, AK3 scripts, matching build metadata, and SHA manifests."
+          awk '{print $2}' "$work/SHA256SUMS.txt" | sort > "$work/checksummed-names.txt"
+          sort "$expected_names" > "$work/expected-zips-sorted.txt"
+          cmp "$work/checksummed-names.txt" "$work/expected-zips-sorted.txt"
+          echo "Validated and uploaded ${EXPECTED_COUNT} ARM64 Images, AK3 scripts, matching build metadata, and SHA manifests to an unpublished draft."
 
       - name: Publish release only after complete verification
         shell: bash
@@ -356,40 +388,41 @@ jobs:
           set -euo pipefail
           work="${RUNNER_TEMP}/ksun-v3.4.2"
           tag="ksun-next-v3.4.2-${SCOPE}-${GITHUB_RUN_ID}"
-          if gh release view "$tag" --json isDraft -q '.isDraft' >/dev/null 2>&1; then
-            if [ "$(gh release view "$tag" --json isDraft -q '.isDraft')" != true ]; then
-              echo "Refusing to modify already published release ${tag}." >&2
-              exit 1
+          test "$(wc -l < "$work/SHA256SUMS.txt")" -eq "$EXPECTED_COUNT"
+          uploaded=false
+          for attempt in 1 2 3; do
+            if gh release upload "$tag" "$work/SHA256SUMS.txt" --clobber; then
+              uploaded=true
+              break
             fi
-          else
-            gh release create "$tag" --target "$GITHUB_SHA" --draft \
-              --title "KernelSU Next v3.4.2 GKI AK3 (${SCOPE})" --notes-file "$work/release-notes.md"
-          fi
-          shopt -s nullglob
-          assets=("$work"/assets/*-KSUN-v3.4.2.zip "$work"/assets/SHA256SUMS.txt)
-          if [ "${#assets[@]}" -ne "$((EXPECTED_COUNT + 1))" ]; then
-            echo 'Release asset count changed after verification.' >&2
+            sleep 10
+          done
+          if [ "$uploaded" != true ]; then
+            echo 'Checksum upload failed. Draft kept unpublished.' >&2
             exit 1
           fi
-          for asset in "${assets[@]}"; do
-            uploaded=false
-            for attempt in 1 2 3; do
-              if gh release upload "$tag" "$asset" --clobber; then uploaded=true; break; fi
-              sleep 10
-            done
-            if [ "$uploaded" != true ]; then
-              echo "Release upload failed: $asset. Draft kept unpublished." >&2
-              exit 1
-            fi
-          done
+          printf '%s\n' SHA256SUMS.txt >> "$work/expected-names.txt"
+          sort "$work/expected-names.txt" > "$work/expected-sorted.txt"
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.id')"
           for attempt in $(seq 1 10); do
-            if gh release view "$tag" --json assets |
-              jq -e --argjson want "$((EXPECTED_COUNT + 1))" \
-                '.assets | length == $want and all(.[]; .size > 0)' >/dev/null; then break; fi
-            if [ "$attempt" -eq 10 ]; then echo 'Incomplete draft release assets.' >&2; exit 1; fi
+            : > "$work/remote-assets.jsonl"
+            rm -f "$work/remote-sorted.txt"
+            for page in $(seq 1 10); do
+              batch="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100&page=${page}")"
+              jq -c '.[] | {name, size, state}' <<< "$batch" >> "$work/remote-assets.jsonl"
+              if [ "$(jq 'length' <<< "$batch")" -lt 100 ]; then break; fi
+              if [ "$page" -eq 10 ]; then echo 'Release has too many assets.' >&2; exit 1; fi
+            done
+            if jq -s -e --argjson want "$((EXPECTED_COUNT + 1))" \
+              'length == $want and all(.[]; .size > 0 and .state == "uploaded")' \
+              "$work/remote-assets.jsonl" >/dev/null; then
+              jq -r .name "$work/remote-assets.jsonl" | sort > "$work/remote-sorted.txt"
+            fi
+            if [ -f "$work/remote-sorted.txt" ] &&
+               cmp -s "$work/expected-sorted.txt" "$work/remote-sorted.txt"; then break; fi
+            if [ "$attempt" -eq 10 ]; then echo 'Incomplete or mismatched draft release assets.' >&2; exit 1; fi
             sleep 5
           done
           gh release edit "$tag" --draft=false
-          gh release view "$tag" --json url,isDraft,assets |
-            jq -e --argjson want "$((EXPECTED_COUNT + 1))" \
-              'select(.isDraft == false and (.assets | length == $want)) | .url'
+          gh release view "$tag" --json url,isDraft |
+            jq -e 'select(.isDraft == false) | .url'
