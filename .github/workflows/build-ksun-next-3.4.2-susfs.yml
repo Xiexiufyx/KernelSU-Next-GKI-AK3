@@ -88,11 +88,15 @@ jobs:
               '.conclusion == "success" and .event == "workflow_dispatch" and
                .path == ".github/workflows/build-ksun-next-3.4.2-susfs.yml" and .head_sha == $sha' \
               <<< "$smoke" >/dev/null
-            gh release view "ksun-next-v3.4.2-susfs-smoke-${SMOKE_RUN_ID}" --json isDraft,assets |
-              jq -e '.isDraft == false and
-                (.assets | length == 5) and
-                ([.assets[] | select(.name | endswith("-KSUN-v3.4.2-SUSFS.zip"))] | length == 1) and
-                ([.assets[] | select(.name == "SHA256SUMS.txt" or
+            smoke_release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+              jq -ers --arg tag "ksun-next-v3.4.2-susfs-smoke-${SMOKE_RUN_ID}" --arg sha "$GITHUB_SHA" '
+                [.[][] | select(.tag_name == $tag and .draft == true and .target_commitish == $sha)] |
+                if length == 1 then .[0].id else error("Missing or mismatched SUSFS smoke draft") end')"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${smoke_release_id}/assets?per_page=100" |
+              jq -e 'length == 5 and
+                all(.[]; .state == "uploaded" and .size > 0 and ((.digest // "") | startswith("sha256:"))) and
+                ([.[] | select(.name | endswith("-KSUN-v3.4.2-SUSFS.zip"))] | length == 1) and
+                ([.[] | select(.name == "SHA256SUMS.txt" or
                   .name == "MANAGER-SHA256SUMS.txt" or
                   .name == "KernelSU_Next_v3.4.2_33355-release.apk" or
                   .name == "KernelSU_Next_v3.4.2-spoofed_33355-release.apk")] | length == 4)' >/dev/null
@@ -529,6 +533,10 @@ jobs:
             if [ "$attempt" -eq 10 ]; then echo 'Incomplete or mismatched draft release assets.' >&2; exit 1; fi
             sleep 5
           done
-          gh release edit "$tag" --draft=false
-          gh release view "$tag" --json url,isDraft |
-            jq -e 'select(.isDraft == false) | .url'
+          if [ "$SCOPE" = smoke ]; then
+            echo "Smoke assets verified in unpublished draft ${tag}; no individual ZIP was published."
+          else
+            gh release edit "$tag" --draft=false
+            gh release view "$tag" --json url,isDraft |
+              jq -e 'select(.isDraft == false) | .url'
+          fi
