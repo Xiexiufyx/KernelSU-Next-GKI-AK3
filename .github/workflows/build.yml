@@ -324,7 +324,6 @@ jobs:
         uses: ./.github/actions/susfs
         with:
           susfs_commit: ${{ steps.susfs-cm.outputs.commit }}
-          root_flavor: ${{ inputs.root_flavor }}
           version: ${{ inputs.version }}
           android_version: ${{ inputs.android_version }}
           kernel_version: ${{ inputs.kernel_version }}
