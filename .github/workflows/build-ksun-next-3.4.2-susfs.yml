@@ -48,6 +48,7 @@ jobs:
       actions: read
     outputs:
       expected_count: ${{ steps.validate.outputs.expected_count }}
+      susfs_commits: ${{ steps.validate.outputs.susfs_commits }}
     steps:
       - uses: actions/checkout@v7
       - name: Validate scope, target, and prior smoke release
@@ -114,13 +115,37 @@ jobs:
           else
             branches=("${supported_families[@]}")
           fi
+          susfs_commits='{}'
           for branch in "${branches[@]}"; do
-            if ! git ls-remote --exit-code --heads https://gitlab.com/simonpunk/susfs4ksu.git "gki-${branch}" >/dev/null; then
+            branch_head="$(git ls-remote --exit-code --heads https://gitlab.com/simonpunk/susfs4ksu.git "refs/heads/gki-${branch}" | cut -f1)" || {
               echo "Missing official SUSFS branch: gki-${branch}; refusing unpatched build." >&2
               exit 1
+            }
+            if ! [[ "$branch_head" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Invalid SUSFS revision for gki-${branch}: ${branch_head}" >&2
+              exit 1
             fi
+            susfs_commits="$(jq -cn --argjson commits "$susfs_commits" --arg family "$branch" --arg sha "$branch_head" '$commits + {($family): $sha}')"
           done
+          if [ "$SCOPE" = full ]; then
+            smoke_asset_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${smoke_release_id}/assets?per_page=100" |
+              jq -er '[.[] | select(.name | endswith("-KSUN-v3.4.2-SUSFS.zip"))] |
+                if length == 1 then .[0].id else error("Missing unique smoke ZIP") end')"
+            smoke_zip="${RUNNER_TEMP}/susfs-smoke-${SMOKE_RUN_ID}.zip"
+            curl -fLsS --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/octet-stream' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/assets/${smoke_asset_id}" -o "$smoke_zip"
+            unzip -tqq "$smoke_zip" >/dev/null
+            unzip -p "$smoke_zip" SOURCE.json |
+              jq -e --argjson commits "$susfs_commits" '
+                .susfs == true and (.kernel.kmi | type == "string") and
+                .susfs_revision == $commits[.kernel.kmi]' >/dev/null || {
+                  echo 'Smoke SUSFS revision differs from the current family pin; rerun smoke before full.' >&2
+                  exit 1
+                }
+          fi
           echo "expected_count=$count" >> "$GITHUB_OUTPUT"
+          echo "susfs_commits=$susfs_commits" >> "$GITHUB_OUTPUT"
           echo "Selected ${count} SUSFS Normal target(s); kernel 6.18 is excluded until a verified SUSFS port exists."
 
   build-android12-5-10:
@@ -131,8 +156,10 @@ jobs:
       config_file: .github/config/android12-5.10.json
       os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
       root_flavor: next
-      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      root_commit: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      root_source: pershoot-susfs
       feature_set: SUSFS
+      susfs_commit: ${{ fromJSON(needs.preflight.outputs.susfs_commits)['android12-5.10'] }}
       variant: Normal
       brand_name: KernelSU-Next
       use_cache: false
@@ -145,8 +172,10 @@ jobs:
       config_file: .github/config/android13-5.10.json
       os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
       root_flavor: next
-      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      root_commit: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      root_source: pershoot-susfs
       feature_set: SUSFS
+      susfs_commit: ${{ fromJSON(needs.preflight.outputs.susfs_commits)['android13-5.10'] }}
       variant: Normal
       brand_name: KernelSU-Next
       use_cache: false
@@ -159,8 +188,10 @@ jobs:
       config_file: .github/config/android13-5.15.json
       os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
       root_flavor: next
-      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      root_commit: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      root_source: pershoot-susfs
       feature_set: SUSFS
+      susfs_commit: ${{ fromJSON(needs.preflight.outputs.susfs_commits)['android13-5.15'] }}
       variant: Normal
       brand_name: KernelSU-Next
       use_cache: false
@@ -173,8 +204,10 @@ jobs:
       config_file: .github/config/android14-5.15.json
       os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
       root_flavor: next
-      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      root_commit: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      root_source: pershoot-susfs
       feature_set: SUSFS
+      susfs_commit: ${{ fromJSON(needs.preflight.outputs.susfs_commits)['android14-5.15'] }}
       variant: Normal
       brand_name: KernelSU-Next
       use_cache: false
@@ -187,8 +220,10 @@ jobs:
       config_file: .github/config/android14-6.1.json
       os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
       root_flavor: next
-      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      root_commit: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      root_source: pershoot-susfs
       feature_set: SUSFS
+      susfs_commit: ${{ fromJSON(needs.preflight.outputs.susfs_commits)['android14-6.1'] }}
       variant: Normal
       brand_name: KernelSU-Next
       use_cache: false
@@ -201,8 +236,10 @@ jobs:
       config_file: .github/config/android15-6.6.json
       os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
       root_flavor: next
-      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      root_commit: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      root_source: pershoot-susfs
       feature_set: SUSFS
+      susfs_commit: ${{ fromJSON(needs.preflight.outputs.susfs_commits)['android15-6.6'] }}
       variant: Normal
       brand_name: KernelSU-Next
       use_cache: false
@@ -215,8 +252,10 @@ jobs:
       config_file: .github/config/android16-6.12.json
       os_patch_level: ${{ inputs.scope == 'full' && 'All' || inputs.patch_level }}
       root_flavor: next
-      root_commit: 4c706b5938665866ebe16944a481a7b91e3396af
+      root_commit: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      root_source: pershoot-susfs
       feature_set: SUSFS
+      susfs_commit: ${{ fromJSON(needs.preflight.outputs.susfs_commits)['android16-6.12'] }}
       variant: Normal
       brand_name: KernelSU-Next
       use_cache: false
@@ -246,7 +285,9 @@ jobs:
       FAMILY: ${{ inputs.family }}
       PATCH_LEVEL: ${{ inputs.patch_level }}
       EXPECTED_COUNT: ${{ needs.preflight.outputs.expected_count }}
-      ROOT_SHA: 4c706b5938665866ebe16944a481a7b91e3396af
+      SUSFS_COMMITS: ${{ needs.preflight.outputs.susfs_commits }}
+      ROOT_SHA: d21e0a66c887ae4bc75b7c9f83e41761819ec09a
+      MANAGER_SOURCE_SHA: 4c706b5938665866ebe16944a481a7b91e3396af
     steps:
       - uses: actions/checkout@v7
       - name: Download, validate, and package every expected GKI artifact
@@ -281,10 +322,10 @@ jobs:
           : > "$expected_names"
           : > "$work/SHA256SUMS.txt"
           tag="ksun-next-v3.4.2-susfs-${SCOPE}-${GITHUB_RUN_ID}"
-          printf 'KernelSU Next v3.4.2 + SUSFS (%s, %s Normal GKI targets)\n\nRoot source: %s\nGitHub Actions run: %s/%s/actions/runs/%s\n\nSUSFS: enabled; each ZIP records its own resolved SUSFS revision in SOURCE.json and BuildInfo. NoMount: disabled. Android 17 / kernel 6.18 is excluded: upstream SUSFS has no verified gki-android17-6.18 branch. Each ZIP contains an Image checksum; see SHA256SUMS.txt for ZIP checksums. Device bootability is not validated.\n' \
+          printf 'KernelSU Next SUSFS kernel + official v3.4.2 managers (%s, %s Normal GKI targets)\n\nRoot source: https://github.com/pershoot/KernelSU-Next (commit %s)\nGitHub Actions run: %s/%s/actions/runs/%s\n\nSUSFS: enabled; each ZIP records its own resolved SUSFS revision in SOURCE.json and BuildInfo. NoMount: disabled. Android 17 / kernel 6.18 is excluded: upstream SUSFS has no verified gki-android17-6.18 branch. Each ZIP contains an Image checksum; see SHA256SUMS.txt for ZIP checksums. Device bootability is not validated.\n' \
             "$SCOPE" "$EXPECTED_COUNT" "$ROOT_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$work/release-notes.md"
           printf '\nStandalone manager APKs: official KernelSU-Next v3.4.2 release (tag v3.4.2, source commit %s). Both normal and spoofed APKs are separate assets, not embedded in the AK3 ZIPs. See MANAGER-SHA256SUMS.txt for their pinned SHA-256 checksums.\n' \
-            "$ROOT_SHA" >> "$work/release-notes.md"
+            "$MANAGER_SOURCE_SHA" >> "$work/release-notes.md"
           printf 'Official manager source: https://github.com/KernelSU-Next/KernelSU-Next/releases/tag/v3.4.2 (upstream repository license: GPL-3.0). Both APKs are redistributed unchanged.\n' >> "$work/release-notes.md"
           release_matches="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
             jq -cs --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]')"
@@ -354,21 +395,26 @@ jobs:
             mapfile -t summaries < <(find "$work/stage-info" -maxdepth 1 -name 'build-summary-*.md' -type f)
             if [ "${#summaries[@]}" -ne 1 ]; then echo "Invalid BuildInfo for ${artifact_name}" >&2; exit 1; fi
             awk '/^```json$/{inside=1;next} inside && /^```$/{exit} inside{print}' "${summaries[0]}" > "$work/metadata.json"
-            jq -e --arg sha "$ROOT_SHA" --arg family "$family" --arg branch "${family}-${date}" '
+            jq -e --arg sha "$ROOT_SHA" --arg family "$family" --arg branch "${family}-${date}" --argjson commits "$SUSFS_COMMITS" '
               .status == "Build-verified only" and
               .root.implementation == "next" and .root.commit == $sha and
+              .root.repository == "https://github.com/pershoot/KernelSU-Next.git" and
               .kmi == $family and .android_branch == $branch and
               (.susfs_revision | test("^[0-9a-f]{40}$")) and
+              .susfs_revision == $commits[$family] and
               (.susfs_config_sha256 | test("^[0-9a-f]{64}$")) and
               (.method | contains("SUSFS")) and .nomount_commit == "N/A" and
               (.kernel_source_commit | test("^[0-9a-f]{40}$"))
             ' "$work/metadata.json" >/dev/null
             jq -n --slurpfile meta "$work/metadata.json" \
-              --arg root "$ROOT_SHA" --arg repo "$GITHUB_REPOSITORY" \
+              --arg root "$ROOT_SHA" --arg manager_commit "$MANAGER_SOURCE_SHA" \
+              --arg repo "$GITHUB_REPOSITORY" \
               --arg workflow_sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
               --arg image_sha "$(sha256sum "$image" | cut -d' ' -f1)" \
               --arg anykernel_sha "$(sha256sum "$script" | cut -d' ' -f1)" \
-              '{kernel_su_next: {version: "v3.4.2", commit: $root},
+              '{kernel_su_next: {version: $meta[0].root.version, commit: $root, repository: "pershoot/KernelSU-Next"},
+                manager: {version: "v3.4.2", commit: $manager_commit,
+                          repository: "KernelSU-Next/KernelSU-Next"},
                 kernel: {kmi: $meta[0].kmi, android_branch: $meta[0].android_branch,
                          source_commit: $meta[0].kernel_source_commit, image_sha256: $image_sha},
                 anykernel_sh_sha256: $anykernel_sha, susfs: true,
@@ -422,8 +468,8 @@ jobs:
           tag_sha="$(git ls-remote "https://github.com/${upstream}.git" \
             'refs/tags/v3.4.2' 'refs/tags/v3.4.2^{}' |
             awk '$2 == "refs/tags/v3.4.2^{}" {peeled=$1} $2 == "refs/tags/v3.4.2" {direct=$1} END {print peeled ? peeled : direct}')"
-          if [ "$tag_sha" != "$ROOT_SHA" ]; then
-            echo "Official manager tag is not the pinned kernel source commit: ${tag_sha}" >&2
+          if [ "$tag_sha" != "$MANAGER_SOURCE_SHA" ]; then
+            echo "Official manager tag is not the pinned manager source commit: ${tag_sha}" >&2
             exit 1
           fi
           upstream_release="$(gh api "repos/${upstream}/releases/tags/v3.4.2")"

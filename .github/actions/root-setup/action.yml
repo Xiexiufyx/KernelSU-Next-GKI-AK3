@@ -7,6 +7,10 @@ inputs:
   commit:
     description: 'Full immutable commit SHA'
     required: true
+  source:
+    description: 'Use official or pinned pershoot SUSFS integration'
+    required: false
+    default: official
 
 runs:
   using: composite
@@ -19,6 +23,11 @@ runs:
 
         flavor="${{ inputs.flavor }}"
         expected_commit="${{ inputs.commit }}"
+        source="${{ inputs.source }}"
+        if [ "$source" != official ] && { [ "$flavor" != next ] || [ "$source" != pershoot-susfs ]; }; then
+          echo "Unsupported root source ${source} for ${flavor}." >&2
+          exit 2
+        fi
         case "$flavor" in
           kernelsu)
             repo="https://github.com/tiann/KernelSU.git"
@@ -26,7 +35,11 @@ runs:
             manager="KernelSU Manager"
             ;;
           next)
-            repo="https://github.com/KernelSU-Next/KernelSU-Next.git"
+            if [ "$source" = pershoot-susfs ]; then
+              repo="https://github.com/pershoot/KernelSU-Next.git"
+            else
+              repo="https://github.com/KernelSU-Next/KernelSU-Next.git"
+            fi
             directory="KernelSU-Next"
             manager="KernelSU Next Manager"
             ;;
@@ -98,6 +111,13 @@ runs:
           echo "Selected root checkout does not contain a kernel integration." >&2
           exit 1
         fi
+        if [ "$source" = pershoot-susfs ]; then
+          if ! grep -qx 'config KSU_SUSFS' "$directory/kernel/Kconfig" ||
+             ! grep -q 'CONFIG_KSU_SUSFS' "$directory/kernel/Kbuild"; then
+            echo "Pinned SUSFS root lacks Kconfig or Kbuild integration: ${actual_commit}" >&2
+            exit 1
+          fi
+        fi
         root_version="$(git -C "$directory" describe --tags --always --dirty)"
 
         relative_kernel="$(realpath --relative-to="$drivers_dir" "$PWD/$directory/kernel")"
@@ -111,6 +131,7 @@ runs:
         echo "ROOT_MANAGER=$manager" >> "$GITHUB_ENV"
         echo "ROOT_VERSION=$root_version" >> "$GITHUB_ENV"
         echo "ROOT_COMMIT=$actual_commit" >> "$GITHUB_ENV"
+        echo "ROOT_SOURCE_REPOSITORY=$repo" >> "$GITHUB_ENV"
 
     - name: Enable root configuration
       uses: ./.github/actions/set-kernel-config

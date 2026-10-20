@@ -43,6 +43,10 @@ on:
         required: false
         type: string
         default: ""
+      root_source:
+        required: false
+        type: string
+        default: official
       nomount_commit:
         required: false
         type: string
@@ -250,6 +254,7 @@ jobs:
         with:
           flavor: ${{ inputs.root_flavor }}
           commit: ${{ inputs.root_commit }}
+          source: ${{ inputs.root_source }}
 
       - name: Mark No Root build metadata
         if: inputs.root_flavor == 'none'
@@ -300,17 +305,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # KernelSU-Next (next) always uses the latest susfs4ksu gki branch tip so
-          # SUSFS stays API-matched to the always-latest KernelSU-Next tree. All
-          # other roots (kernelsu, bakasu, finasu, sukisu-ultra) use the pinned
-          # verified SUSFS commit.
-          if [ "${{ inputs.root_flavor }}" = "next" ]; then
+          # Honor a run-wide pinned revision when supplied by the release workflow.
+          # Other workflows may still opt into the current branch tip for next.
+          if [ -n "${{ inputs.susfs_commit }}" ]; then
+            SUSFS_COMMIT="${{ inputs.susfs_commit }}"
+            echo "Using pinned SUSFS commit: ${SUSFS_COMMIT}"
+          elif [ "${{ inputs.root_flavor }}" = "next" ]; then
             BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
             SUSFS_COMMIT="$(git ls-remote https://gitlab.com/simonpunk/susfs4ksu.git "refs/heads/${BRANCH}" | cut -f1)"
             echo "KernelSU-Next: resolving SUSFS at latest on ${BRANCH} -> ${SUSFS_COMMIT}"
           else
             SUSFS_COMMIT="${{ inputs.susfs_commit }}"
-            echo "Using pinned SUSFS commit: ${SUSFS_COMMIT}"
           fi
           echo "commit=${SUSFS_COMMIT}" >> "$GITHUB_OUTPUT"
 
@@ -319,6 +324,7 @@ jobs:
         uses: ./.github/actions/susfs
         with:
           susfs_commit: ${{ steps.susfs-cm.outputs.commit }}
+          root_flavor: ${{ inputs.root_flavor }}
           version: ${{ inputs.version }}
           android_version: ${{ inputs.android_version }}
           kernel_version: ${{ inputs.kernel_version }}
@@ -570,8 +576,12 @@ jobs:
             echo 'SUSFS was requested but final kernel config is missing or does not enable CONFIG_KSU_SUSFS=y.' >&2
             exit 1
           fi
+          if [ ! -s AnyKernel3/Image ] || ! LC_ALL=C grep -aFq 'susfs' AnyKernel3/Image; then
+            echo 'SUSFS was requested but the built Image has no SUSFS symbols or strings.' >&2
+            exit 1
+          fi
           echo "SUSFS_FINAL_CONFIG_SHA256=$(sha256sum "$config" | cut -d' ' -f1)" >> "$GITHUB_ENV"
-          echo "Verified CONFIG_KSU_SUSFS=y in final build config: $config"
+          echo "Verified CONFIG_KSU_SUSFS=y in $config and SUSFS content in AnyKernel3/Image"
 
       - name: Get Cache Stats
         uses: ./.github/actions/cache-stats
@@ -819,6 +829,7 @@ jobs:
             --arg root_manager "${ROOT_MANAGER:-KernelSU-Next Manager}" \
             --arg root_version "${ROOT_VERSION:-${KSU_GIT_TAG:-N/A}}" \
             --arg root_commit "${ROOT_COMMIT:-${KSU_COMMIT:-N/A}}" \
+            --arg root_repository "${ROOT_SOURCE_REPOSITORY:-N/A}" \
             --arg susfs_commit "${SUSFS_COMMIT:-N/A}" \
             --arg susfs_config_sha256 "${SUSFS_FINAL_CONFIG_SHA256:-N/A}" \
             --arg nomount_commit "${NOMOUNT_COMMIT:-N/A}" \
@@ -843,7 +854,8 @@ jobs:
                 implementation: $root_implementation,
                 manager: $root_manager,
                 version: $root_version,
-                commit: $root_commit
+                commit: $root_commit,
+                repository: $root_repository
               },
               susfs_revision: $susfs_commit,
               susfs_config_sha256: $susfs_config_sha256,
