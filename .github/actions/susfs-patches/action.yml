@@ -74,13 +74,19 @@ runs:
           echo "Adding inotify_mark_user_mask function definition"
           python3 -c 'import re;c=open("fs/notify/fdinfo.c").read();c=re.sub(r"^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$",lambda m:"static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)\n{\n\treturn mark->mask & IN_ALL_EVENTS;\n}\n\n"+m.group(0),c,count=1,flags=re.MULTILINE);open("fs/notify/fdinfo.c","w").write(c)'
         fi
-        if [ "${{ inputs.sublevel }}" -ge "197" ]; then
-          echo "Applying namespace.c Android 13 5.15 Fake Patch"
-          sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+        # The pinned 5.15 SUSFS patch expects these hooks as exact context,
+        # although several stock GKI revisions omit one or both headers.
+        # Inject missing lines temporarily; restore their original absence
+        # after patching so old kernels do not include unavailable headers.
+        if ! grep -Fxq '#include <trace/hooks/blk.h>' fs/namespace.c; then
+          grep -Fxq '#include "internal.h"' fs/namespace.c || { echo 'Missing namespace.c include anchor' >&2; exit 1; }
+          sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
+          echo 'SUSFS_5_15_SYNTHETIC_BLK=1' >> "$GITHUB_ENV"
         fi
-        if [ "${{ inputs.sublevel }}" -ge "197" ]; then
-          echo "Applying task_mmu.c Android 13 5.15 Fake Patch"
-          sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
+        if ! grep -Fxq '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c; then
+          grep -Fxq '#include <linux/pkeys.h>' fs/proc/task_mmu.c || { echo 'Missing task_mmu.c include anchor' >&2; exit 1; }
+          sed -i '/^#include <linux\/pkeys.h>$/a #include <trace/hooks/mm.h>' fs/proc/task_mmu.c
+          echo 'SUSFS_5_15_SYNTHETIC_MM=1' >> "$GITHUB_ENV"
         fi
 
     - name: Apply Android 14 6.1 Fake Patches
@@ -95,12 +101,6 @@ runs:
         if [ "${{ inputs.sublevel }}" -le "141" ]; then
           echo "Applying base.c Android 14 6.1 Fake Patch"
           sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
-        fi
-        if [ "${{ inputs.sublevel }}" -ge "157" ]; then
-          echo "Applying namespace.c Android 14 6.1 Fake Patch"
-          sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
-          echo "Applying super.c Android 14 6.1 Fake Patch"
-          sed -i '/^#include <trace\/hooks\/fs.h>$/,+1 d' fs/super.c
         fi
 
     - name: Apply Android 15 6.6 Fake Patches
@@ -148,6 +148,22 @@ runs:
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         patch -p1 < 50_add_susfs_in_gki-${{ inputs.version }}.patch
+
+        if [ "${{ inputs.version }}" = "android13-5.15" ]; then
+          if [ "${SUSFS_5_15_SYNTHETIC_BLK:-0}" = 1 ] || [ "${{ inputs.sublevel }}" -ge 197 ]; then
+            sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+          fi
+          if [ "${SUSFS_5_15_SYNTHETIC_MM:-0}" = 1 ] || [ "${{ inputs.sublevel }}" -ge 197 ]; then
+            sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
+          fi
+        fi
+
+        # Preserve the original patch context: recent 6.1 trees need these
+        # stale hook includes removed only after the SUSFS patch is applied.
+        if [ "${{ inputs.version }}" = "android14-6.1" ] && [ "${{ inputs.sublevel }}" -ge "157" ]; then
+          sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+          sed -i '/^#include <trace\/hooks\/fs.h>$/,+1 d' fs/super.c
+        fi
 
         # SUSFS's OPEN_REDIRECT code unconditionally calls VMA_PAD_START(), which
         # only exists on GKI branches that carry Google's page-size-migration
