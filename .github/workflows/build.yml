@@ -551,6 +551,28 @@ jobs:
           version: ${{ inputs.version }}
           page_size: ${{ inputs.page_size }}
 
+      - name: Verify built KernelSU Next SUSFS configuration
+        if: inputs.root_flavor == 'next' && contains(inputs.feature_set, 'SUSFS')
+        shell: bash
+        run: |
+          set -euo pipefail
+          config=""
+          for candidate in \
+            kernel/bazel-bin/common/kernel_aarch64_config/out_dir/.config \
+            /home/runner/out/.config; do
+            if [ -f "$candidate" ]; then config="$candidate"; break; fi
+          done
+          if [ -z "$config" ]; then
+            config="$(find kernel/bazel-bin/common /home/runner/out -maxdepth 4 -name .config -type f 2>/dev/null | head -n1 || true)"
+          fi
+          if [ -z "$config" ] || ! grep -qx 'CONFIG_KSU=y' "$config" ||
+             ! grep -qx 'CONFIG_KSU_SUSFS=y' "$config"; then
+            echo 'SUSFS was requested but final kernel config is missing or does not enable CONFIG_KSU_SUSFS=y.' >&2
+            exit 1
+          fi
+          echo "SUSFS_FINAL_CONFIG_SHA256=$(sha256sum "$config" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "Verified CONFIG_KSU_SUSFS=y in final build config: $config"
+
       - name: Get Cache Stats
         uses: ./.github/actions/cache-stats
         with:
@@ -798,6 +820,7 @@ jobs:
             --arg root_version "${ROOT_VERSION:-${KSU_GIT_TAG:-N/A}}" \
             --arg root_commit "${ROOT_COMMIT:-${KSU_COMMIT:-N/A}}" \
             --arg susfs_commit "${SUSFS_COMMIT:-N/A}" \
+            --arg susfs_config_sha256 "${SUSFS_FINAL_CONFIG_SHA256:-N/A}" \
             --arg nomount_commit "${NOMOUNT_COMMIT:-N/A}" \
             --arg android_branch "${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}" \
             --arg kmi "${{ inputs.android_version }}-${{ inputs.kernel_version }}" \
@@ -823,6 +846,7 @@ jobs:
                 commit: $root_commit
               },
               susfs_revision: $susfs_commit,
+              susfs_config_sha256: $susfs_config_sha256,
               nomount_commit: $nomount_commit,
               android_branch: $android_branch,
               kmi: $kmi,
@@ -850,9 +874,12 @@ jobs:
             (.root.manager | length > 0) and
             (.root.version | length > 0) and
             (if $susfs_enabled == "true" then
-              (.susfs_revision | test("^[0-9a-f]{40}$"))
+              (.susfs_revision | test("^[0-9a-f]{40}$")) and
+              (if .root.implementation == "next" then
+                (.susfs_config_sha256 | test("^[0-9a-f]{64}$"))
+              else true end)
             else
-              .susfs_revision == "N/A"
+              .susfs_revision == "N/A" and .susfs_config_sha256 == "N/A"
             end) and
             (.kernel_source_commit | test("^[0-9a-f]{40}$")) and
             (.artifact_url | startswith("https://")) and
