@@ -82,7 +82,12 @@ jobs:
               <<< "$smoke" >/dev/null
             gh release view "ksun-next-v3.4.2-smoke-${SMOKE_RUN_ID}" --json isDraft,assets |
               jq -e '.isDraft == false and
-                ([.assets[] | select(.name | endswith("-KSUN-v3.4.2.zip"))] | length == 1)' >/dev/null
+                (.assets | length == 5) and
+                ([.assets[] | select(.name | endswith("-KSUN-v3.4.2.zip"))] | length == 1) and
+                ([.assets[] | select(.name == "SHA256SUMS.txt" or
+                  .name == "MANAGER-SHA256SUMS.txt" or
+                  .name == "KernelSU_Next_v3.4.2_33355-release.apk" or
+                  .name == "KernelSU_Next_v3.4.2-spoofed_33355-release.apk")] | length == 4)' >/dev/null
             count="$(jq -s '[.[] | .include | length] | add' .github/config/android*.json)"
             if [ "$count" -ne 211 ]; then
               echo "Expected 211 Normal configuration rows, found ${count}; review matrix before building." >&2
@@ -270,6 +275,9 @@ jobs:
           tag="ksun-next-v3.4.2-${SCOPE}-${GITHUB_RUN_ID}"
           printf 'KernelSU Next v3.4.2 (%s, %s Normal GKI targets)\n\nRoot source: %s\nGitHub Actions run: %s/%s/actions/runs/%s\n\nSUSFS: disabled. NoMount: disabled. Each ZIP contains its own SOURCE.json with kernel commit and Image checksum. See SHA256SUMS.txt for ZIP checksums. GKI compatibility is not a guarantee of device bootability.\n' \
             "$SCOPE" "$EXPECTED_COUNT" "$ROOT_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$work/release-notes.md"
+          printf '\nStandalone manager APKs: official KernelSU-Next v3.4.2 release (tag v3.4.2, source commit %s). Both normal and spoofed APKs are separate assets, not embedded in the AK3 ZIPs. See MANAGER-SHA256SUMS.txt for their pinned SHA-256 checksums.\n' \
+            "$ROOT_SHA" >> "$work/release-notes.md"
+          printf 'Official manager source: https://github.com/KernelSU-Next/KernelSU-Next/releases/tag/v3.4.2 (upstream repository license: GPL-3.0). Both APKs are redistributed unchanged.\n' >> "$work/release-notes.md"
           release_matches="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
             jq -cs --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]')"
           if [ "$(jq 'length' <<< "$release_matches")" -gt 1 ]; then
@@ -388,6 +396,75 @@ jobs:
           cmp "$work/checksummed-names.txt" "$work/expected-zips-sorted.txt"
           echo "Validated and uploaded ${EXPECTED_COUNT} ARM64 Images, AK3 scripts, matching build metadata, and SHA manifests to an unpublished draft."
 
+      - name: Verify and upload official v3.4.2 manager APKs to draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/ksun-v3.4.2"
+          tag="ksun-next-v3.4.2-${SCOPE}-${GITHUB_RUN_ID}"
+          upstream="KernelSU-Next/KernelSU-Next"
+          normal="KernelSU_Next_v3.4.2_33355-release.apk"
+          spoofed="KernelSU_Next_v3.4.2-spoofed_33355-release.apk"
+          normal_sha="774a5511f7034a4930e881114e202319cbdc34c5aaaa5c7c6b6d2902364e4c58"
+          spoofed_sha="e27ad21204e8f58a4268c41725de97341c62a2f4acca7fa4dda256e9d7863d01"
+          tag_sha="$(git ls-remote "https://github.com/${upstream}.git" \
+            'refs/tags/v3.4.2' 'refs/tags/v3.4.2^{}' |
+            awk '$2 == "refs/tags/v3.4.2^{}" {peeled=$1} $2 == "refs/tags/v3.4.2" {direct=$1} END {print peeled ? peeled : direct}')"
+          if [ "$tag_sha" != "$ROOT_SHA" ]; then
+            echo "Official manager tag is not the pinned kernel source commit: ${tag_sha}" >&2
+            exit 1
+          fi
+          upstream_release="$(gh api "repos/${upstream}/releases/tags/v3.4.2")"
+          jq -e --arg normal "$normal" --arg spoofed "$spoofed" \
+            --arg normal_sha "$normal_sha" --arg spoofed_sha "$spoofed_sha" '
+            .tag_name == "v3.4.2" and .draft == false and
+            ([.assets[] | select(.name == $normal or .name == $spoofed)] | length == 2) and
+            all(.assets[] | select(.name == $normal or .name == $spoofed);
+              .state == "uploaded" and .size > 0 and
+              .digest == ("sha256:" + (if .name == $normal then $normal_sha else $spoofed_sha end)))
+          ' <<< "$upstream_release" >/dev/null
+          : > "$work/MANAGER-SHA256SUMS.txt"
+          for spec in "$normal:$normal_sha" "$spoofed:$spoofed_sha"; do
+            name="${spec%%:*}"
+            expected_sha="${spec#*:}"
+            url="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .browser_download_url' <<< "$upstream_release")"
+            if [ "$url" != "https://github.com/${upstream}/releases/download/v3.4.2/${name}" ]; then
+              echo "Unexpected official APK download URL: ${name}" >&2
+              exit 1
+            fi
+            curl -fLsS --retry 3 --retry-all-errors "$url" -o "$work/assets/$name"
+            test -s "$work/assets/$name"
+            upstream_size="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .size' <<< "$upstream_release")"
+            if [ "$(stat -c %s "$work/assets/$name")" -ne "$upstream_size" ]; then
+              echo "Official APK size mismatch: ${name}" >&2
+              exit 1
+            fi
+            unzip -tqq "$work/assets/$name" >/dev/null
+            actual_sha="$(sha256sum "$work/assets/$name" | cut -d' ' -f1)"
+            if [ "$actual_sha" != "$expected_sha" ]; then
+              echo "Official APK SHA-256 mismatch: ${name}" >&2
+              exit 1
+            fi
+            printf '%s  %s\n' "$actual_sha" "$name" >> "$work/MANAGER-SHA256SUMS.txt"
+          done
+          test "$(wc -l < "$work/MANAGER-SHA256SUMS.txt")" -eq 2
+          for name in "$normal" "$spoofed"; do
+            uploaded=false
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$work/assets/$name" --clobber; then
+                uploaded=true
+                break
+              fi
+              sleep 10
+            done
+            if [ "$uploaded" != true ]; then
+              echo "Manager upload failed: $name. Draft kept unpublished." >&2
+              exit 1
+            fi
+            printf '%s\n' "$name" >> "$work/expected-names.txt"
+          done
+          echo 'Validated and uploaded both pinned official manager APKs to the unpublished draft.'
+
       - name: Publish release only after complete verification
         shell: bash
         run: |
@@ -395,20 +472,28 @@ jobs:
           work="${RUNNER_TEMP}/ksun-v3.4.2"
           tag="ksun-next-v3.4.2-${SCOPE}-${GITHUB_RUN_ID}"
           test "$(wc -l < "$work/SHA256SUMS.txt")" -eq "$EXPECTED_COUNT"
-          uploaded=false
-          for attempt in 1 2 3; do
-            if gh release upload "$tag" "$work/SHA256SUMS.txt" --clobber; then
-              uploaded=true
-              break
+          test "$(wc -l < "$work/MANAGER-SHA256SUMS.txt")" -eq 2
+          for manifest in SHA256SUMS.txt MANAGER-SHA256SUMS.txt; do
+            uploaded=false
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$work/$manifest" --clobber; then
+                uploaded=true
+                break
+              fi
+              sleep 10
+            done
+            if [ "$uploaded" != true ]; then
+              echo "Checksum upload failed: $manifest. Draft kept unpublished." >&2
+              exit 1
             fi
-            sleep 10
+            printf '%s\n' "$manifest" >> "$work/expected-names.txt"
           done
-          if [ "$uploaded" != true ]; then
-            echo 'Checksum upload failed. Draft kept unpublished.' >&2
-            exit 1
-          fi
-          printf '%s\n' SHA256SUMS.txt >> "$work/expected-names.txt"
           sort "$work/expected-names.txt" > "$work/expected-sorted.txt"
+          {
+            cat "$work/SHA256SUMS.txt" "$work/MANAGER-SHA256SUMS.txt"
+            (cd "$work" && sha256sum SHA256SUMS.txt MANAGER-SHA256SUMS.txt)
+          } | awk '{print $2 "\tsha256:" $1}' | sort > "$work/expected-digests-sorted.txt"
+          test "$(wc -l < "$work/expected-digests-sorted.txt")" -eq "$((EXPECTED_COUNT + 4))"
           release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
             jq -ers --arg tag "$tag" --arg sha "$GITHUB_SHA" '
               [.[][] | select(.tag_name == $tag)] |
@@ -416,20 +501,23 @@ jobs:
               then .[0].id else error("Missing or mismatched draft release") end')"
           for attempt in $(seq 1 10); do
             : > "$work/remote-assets.jsonl"
-            rm -f "$work/remote-sorted.txt"
+            rm -f "$work/remote-sorted.txt" "$work/remote-digests-sorted.txt"
             for page in $(seq 1 10); do
               batch="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100&page=${page}")"
-              jq -c '.[] | {name, size, state}' <<< "$batch" >> "$work/remote-assets.jsonl"
+              jq -c '.[] | {name, size, state, digest}' <<< "$batch" >> "$work/remote-assets.jsonl"
               if [ "$(jq 'length' <<< "$batch")" -lt 100 ]; then break; fi
               if [ "$page" -eq 10 ]; then echo 'Release has too many assets.' >&2; exit 1; fi
             done
-            if jq -s -e --argjson want "$((EXPECTED_COUNT + 1))" \
-              'length == $want and all(.[]; .size > 0 and .state == "uploaded")' \
+            if jq -s -e --argjson want "$((EXPECTED_COUNT + 4))" \
+              'length == $want and all(.[]; .size > 0 and .state == "uploaded" and ((.digest // "") | startswith("sha256:")))' \
               "$work/remote-assets.jsonl" >/dev/null; then
               jq -r .name "$work/remote-assets.jsonl" | sort > "$work/remote-sorted.txt"
+              jq -r '[.name, .digest] | @tsv' "$work/remote-assets.jsonl" | sort > "$work/remote-digests-sorted.txt"
             fi
             if [ -f "$work/remote-sorted.txt" ] &&
-               cmp -s "$work/expected-sorted.txt" "$work/remote-sorted.txt"; then break; fi
+               [ -f "$work/remote-digests-sorted.txt" ] &&
+               cmp -s "$work/expected-sorted.txt" "$work/remote-sorted.txt" &&
+               cmp -s "$work/expected-digests-sorted.txt" "$work/remote-digests-sorted.txt"; then break; fi
             if [ "$attempt" -eq 10 ]; then echo 'Incomplete or mismatched draft release assets.' >&2; exit 1; fi
             sleep 5
           done
