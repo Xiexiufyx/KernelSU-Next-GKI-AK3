@@ -103,6 +103,14 @@ runs:
           sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
         fi
 
+        # Match the pinned 6.1 SUSFS namespace hunk on older stock trees.
+        # Restore the original absence of this context-only header after patching.
+        if ! grep -Fxq '#include <trace/hooks/blk.h>' fs/namespace.c; then
+          grep -Fxq '#include "internal.h"' fs/namespace.c || { echo 'Missing namespace.c include anchor' >&2; exit 1; }
+          sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
+          echo 'SUSFS_6_1_SYNTHETIC_BLK=1' >> "$GITHUB_ENV"
+        fi
+
     - name: Apply Android 15 6.6 Fake Patches
       shell: bash
       if: inputs.version == 'android15-6.6'
@@ -147,6 +155,147 @@ runs:
       shell: bash
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
+        if [ "${{ inputs.version }}" = "android16-6.12" ]; then
+          python3 - --source-root . --patch "50_add_susfs_in_gki-${{ inputs.version }}.patch" <<'PY'
+        #!/usr/bin/env python3
+        """Adapt only known SUSFS 6.12 patch hunks to older GKI smaps layouts.
+
+        Run before applying the SUSFS patch. Kernel source is read, never modified.
+        Unknown patch hunks or source layouts stop without writing the patch.
+        """
+        from pathlib import Path
+        import argparse
+        import difflib
+        import re
+
+
+        def fail(message):
+            raise SystemExit('SUSFS 6.12 adaptation refused: ' + message)
+
+
+        def section(patch, name):
+            marker = f'diff --git a/{name} b/{name}\n'
+            if patch.count(marker) != 1:
+                fail(f'expected one {name} patch section')
+            start = patch.index(marker)
+            end = patch.find('\ndiff --git ', start + len(marker))
+            if end < 0:
+                end = len(patch)
+            else:
+                end += 1
+            return start, end, patch[start:end]
+
+
+        def hunks(text):
+            starts = [m.start() for m in re.finditer(r'^@@ ', text, re.M)]
+            return [(start, starts[i + 1] if i + 1 < len(starts) else len(text),
+                     text[start:starts[i + 1] if i + 1 < len(starts) else len(text)])
+                    for i, start in enumerate(starts)]
+
+
+        def generated_hunks(before, after):
+            lines = list(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                                             fromfile='source', tofile='adapted', n=3))
+            if len(lines) < 3:
+                fail('expected source-layout adaptation changes')
+            return ''.join(lines[2:])
+
+
+        def old_function(source, signature):
+            if source.count(signature) != 1:
+                fail('expected one function ' + signature)
+            start = source.index(signature)
+            end = source.find('\n}\n', start)
+            if end < 0:
+                fail('unterminated function ' + signature)
+            return start, end + 3, source[start:end + 3]
+
+
+        def adapt(root, patch):
+            edits = []
+            exec_source = (root / 'fs/exec.c').read_text(encoding='utf-8')
+            start, end, part = section(patch, 'fs/exec.c')
+            hs = hunks(part)
+            if not hs or '#include <linux/dma-buf.h>\n' not in hs[0][2]:
+                fail('unexpected exec.c include hunk')
+            if '#include <linux/dma-buf.h>\n' not in exec_source:
+                anchor = '#include <linux/rseq.h>\n#include <linux/ksm.h>\n\n#include <linux/uaccess.h>\n#include <asm/mmu_context.h>\n'
+                if exec_source.count(anchor) != 1:
+                    fail('unknown exec.c include layout')
+                if hs[0][2].count('+#ifdef CONFIG_KSU_SUSFS\n+#include <linux/susfs_def.h>\n+#endif\n') != 1:
+                    fail('unexpected exec.c include payload')
+                after = exec_source.replace(anchor, anchor.replace('\n\n#include <linux/uaccess.h>',
+                    '\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n\n#include <linux/uaccess.h>'), 1)
+                a, b, _ = hs[0]
+                edits.append((start, end, part[:a] + generated_hunks(exec_source, after) + part[b:]))
+
+            source = (root / 'fs/proc/task_mmu.c').read_text(encoding='utf-8')
+            start, end, part = section(patch, 'fs/proc/task_mmu.c')
+            hs = hunks(part)
+            selected = [(a,b,h) for a,b,h in hs if 'static int show_smap(' in h.splitlines()[0]
+                        or 'static int show_smaps_rollup(' in h.splitlines()[0]]
+            if len(selected) != 3:
+                fail('expected exactly three smaps patch hunks')
+            if selected[0][2].count(' \tif (!vma_data_pages(vma))\n') != 1:
+                fail('unexpected show_smap patch context')
+            if (' \t\t\tgoto out_unlock;\n' not in selected[1][2] or
+                ' \t\t\tsmap_gather_stats(priv, vma, &mss);\n' not in selected[2][2]):
+                fail('unexpected show_smaps_rollup patch context')
+            a,b,show = old_function(source, 'static int show_smap(struct seq_file *m, void *v)\n')
+            c,d,roll = old_function(source, 'static int show_smaps_rollup(struct seq_file *m, void *v)\n')
+            # Newer layouts already match the pinned SUSFS patch; preserve them untouched.
+            if 'smap_gather_stats(priv, vma, &mss)' in roll:
+                if 'if (!vma_data_pages(vma))' not in show or 'goto out_unlock;' not in roll:
+                    fail('incomplete modern smaps layout')
+            else:
+                anchor = '\tstruct mem_size_stats mss = {};\n\n\tif (!vma_pages(vma))\n\t\tgoto show_pad;\n'
+                if show.count(anchor) != 1:
+                    fail('unknown legacy show_smap layout')
+                calls = [line for line in roll.splitlines(True) if 'smap_gather_stats(' in line]
+                expected = ['\t\tsmap_gather_stats(vma, &mss, 0);\n',
+                            '\t\t\t\tsmap_gather_stats(vma, &mss, 0);\n',
+                            '\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);\n']
+                if calls != expected or roll.count('\t} for_each_vma(vmi, vma);\n') != 1:
+                    fail('unknown legacy show_smaps_rollup layout')
+                if 'SUSFS_IS_INODE_SUS_MAP' in show + roll:
+                    fail('smaps source already contains SUSFS guards')
+                guard = ('#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+                         '\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n'
+                         '\t\treturn 0;\n'
+                         '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\n')
+                fixed_show = show.replace(anchor, anchor.replace('\tif (!vma_pages(vma))', guard + '\tif (!vma_pages(vma))'), 1)
+                fixed_roll = roll
+                for call in calls:
+                    indent = call[:len(call) - len(call.lstrip('\t'))]
+                    guarded = ('#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n' + indent +
+                        'if (!(vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))))\n' +
+                        '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n' + indent + '\t' + call.lstrip('\t'))
+                    fixed_roll = fixed_roll.replace(call, guarded, 1)
+                fixed = source[:a] + fixed_show + source[b:c] + fixed_roll + source[d:]
+                first, last = selected[0][0], selected[-1][1]
+                edits.append((start, end, part[:first] + generated_hunks(source, fixed) + part[last:]))
+            for start, end, replacement in sorted(edits, reverse=True):
+                patch = patch[:start] + replacement + patch[end:]
+            return patch, len(edits)
+
+
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--source-root', type=Path, default=Path('.'))
+            parser.add_argument('--patch', type=Path, required=True)
+            args = parser.parse_args()
+            original = args.patch.read_text(encoding='utf-8')
+            updated, changes = adapt(args.source_root, original)
+            if updated != original:
+                args.patch.write_text(updated, encoding='utf-8', newline='\n')
+            print(f'SUSFS 6.12: adapted {changes} known legacy file layout(s)')
+
+
+        if __name__ == '__main__':
+            main()
+        PY
+        fi
+
         patch -p1 < 50_add_susfs_in_gki-${{ inputs.version }}.patch
 
         if [ "${{ inputs.version }}" = "android13-5.15" ]; then
@@ -156,6 +305,10 @@ runs:
           if [ "${SUSFS_5_15_SYNTHETIC_MM:-0}" = 1 ] || [ "${{ inputs.sublevel }}" -ge 197 ]; then
             sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
           fi
+        fi
+
+        if [ "${{ inputs.version }}" = "android14-6.1" ] && [ "${SUSFS_6_1_SYNTHETIC_BLK:-0}" = 1 ]; then
+          sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
         fi
 
         # Preserve the original patch context: recent 6.1 trees need these
